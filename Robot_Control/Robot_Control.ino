@@ -6,12 +6,12 @@ Servo elbowServo;
 
 int wristPos = 90;
 int clawPos = 140; 
-int elbowPos = 90; // start open
+int elbowPos = 90;
 
 void setup() {
-  wristServo.attach(11);  // wrist/spin servo
-  clawServo.attach(12);   // claw servo
-  elbowServo.attach(13);  // elbow servo
+  wristServo.attach(11);
+  clawServo.attach(12);
+  elbowServo.attach(13);
 
   wristServo.write(wristPos);
   clawServo.write(clawPos);
@@ -24,7 +24,6 @@ void loop() {
   if (Serial.available() >= 7) {
     byte startByte = Serial.read();
 
-    // Ignore garbage until we find the packet start marker
     if (startByte != 255) {
       return;
     }

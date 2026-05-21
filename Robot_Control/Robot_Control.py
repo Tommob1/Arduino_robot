@@ -48,7 +48,7 @@ joystick_y = 0
 joystick_button = 0
 
 last_joystick_send_time = 0
-JOYSTICK_SEND_INTERVAL = 0.03  # about 33 commands per second
+JOYSTICK_SEND_INTERVAL = 0.03
 
 # Voice
 voice_thread = None
@@ -61,14 +61,12 @@ VOICE_MODEL_DIR = "models/vosk-model-small-en-us-0.15"
 def clamp(val, lo=0, hi=180):
     return max(lo, min(int(val), hi))
 
-
 def find_arduino_port():
     ports = list(serial.tools.list_ports.comports())
     for port in ports:
         if 'Arduino' in port.description or 'usbmodem' in port.device:
             return port.device
     return None
-
 
 def initialize_serial_connection():
     global ser
@@ -85,12 +83,10 @@ def initialize_serial_connection():
         ser = None
         print("Arduino not found.")
 
-
 def map_value(x, in_min, in_max, out_min, out_max):
     if in_max == in_min:
         return out_min
     return int((x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min)
-
 
 def send_command():
     global ser, servo1_pos, servo2_pos, servo3_pos
@@ -270,8 +266,6 @@ def joystick_worker():
             return
 
         joystick = hid.device()
-
-        # More reliable on macOS than joystick.open(VID, PID)
         joystick.open_path(device_info["path"])
 
         print(f"Connected to joystick: {joystick.get_product_string()}")
@@ -328,8 +322,6 @@ def start_joystick_tracking():
 
     if tracking_joystick:
         return
-
-    # Stop other live control modes so they do not fight each other
     if tracking_mouse:
         stop_mouse_tracking()
 
