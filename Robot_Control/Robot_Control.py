@@ -10,10 +10,9 @@ import threading
 import queue
 import json
 import time
-import hid
 import sounddevice as sd
 from vosk import Model, KaldiRecognizer
-from voice_movement import handle_command
+import voice_movement
 
 # GLOBAL STATE
 tracking_mouse = False
@@ -30,7 +29,6 @@ ser = None
 serial_lock = threading.Lock()
 
 claw_grabbing = False
-claw_busy = False
 
 CLAW_OPEN_POS = 160
 CLAW_CLOSED_POS = 60
@@ -49,6 +47,9 @@ joystick_button = 0
 
 last_joystick_send_time = 0
 JOYSTICK_SEND_INTERVAL = 0.03
+
+# HAND TRACKING
+hand_thread = None
 
 # Voice
 voice_thread = None
@@ -89,6 +90,10 @@ def map_value(x, in_min, in_max, out_min, out_max):
     return int((x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min)
 
 def send_command():
+    """The ONLY place that writes to the Arduino. Robot_Control.ino expects a
+    255 start byte followed by 3x little-endian uint16 (wrist, claw, elbow) -
+    7 bytes total. Hand_Tracker and voice_movement no longer pack their own
+    packets; everything funnels through apply_servo_update() -> here."""
     global ser, servo1_pos, servo2_pos, servo3_pos
 
     s1 = clamp(servo1_pos)
@@ -107,6 +112,24 @@ def send_command():
     else:
         print("Serial connection not initialized. Reconnecting...")
         initialize_serial_connection()
+
+
+def apply_servo_update(s1=None, s2=None, s3=None):
+    """Single shared entry point for every control source (mouse, joystick,
+    hand tracking, voice). This is what keeps servo1_pos/servo2_pos/servo3_pos,
+    the GUI telemetry, and the actual wire protocol from drifting out of sync
+    with each other - previously Hand_Tracker and voice_movement each kept
+    their own separate position state and their own (incompatible) serial
+    connection, invisible to this GUI and to each other."""
+    global servo1_pos, servo2_pos, servo3_pos
+    if s1 is not None:
+        servo1_pos = clamp(s1)
+    if s2 is not None:
+        servo2_pos = clamp(s2)
+    if s3 is not None:
+        servo3_pos = clamp(s3)
+    send_command()
+    root.after(0, update_telemetry)
 
 
 def update_telemetry():
@@ -133,62 +156,37 @@ def load_text_character_by_character(widget, text, index=0, delay=50):
         widget.after(delay, lambda: load_text_character_by_character(widget, text, index + 1, delay))
 
 # CLAW CONTROL
-def set_claw_position(target):
-    global servo2_pos
-    servo2_pos = clamp(target)
-    update_telemetry()
-    send_command()
-
-
 def close_claw():
-    global claw_busy, claw_grabbing
-
-    if claw_busy:
-        return
-
-    claw_busy = True
+    global claw_grabbing
     claw_grabbing = True
-    set_claw_position(CLAW_CLOSED_POS)
-
-    claw_busy = False
-
+    apply_servo_update(s2=CLAW_CLOSED_POS)
 
 def open_claw():
-    global claw_busy, claw_grabbing
-
-    if claw_busy:
-        return
-
-    claw_busy = True
+    global claw_grabbing
     claw_grabbing = False
-
-    set_claw_position(CLAW_OPEN_POS)
-
-    claw_busy = False
-
+    apply_servo_update(s2=CLAW_OPEN_POS)
 
 def toggle_claw():
-    if claw_busy:
-        return
-
     if claw_grabbing:
-        threading.Thread(target=open_claw, daemon=True).start()
+        open_claw()
     else:
-        threading.Thread(target=close_claw, daemon=True).start()
-
+        close_claw()
 
 
 # MOUSE CONTROL
 def on_move(x, y):
-    global mouse_x, mouse_y, servo1_pos, servo3_pos
+    global mouse_x, mouse_y
 
     if tracking_mouse:
         mouse_x, mouse_y = x, y
-        servo1_pos = clamp(map_value(mouse_x, 0, 1920, 10, 170))
-        servo3_pos = clamp(map_value(mouse_y, 0, 1920, 10, 170))
-
-        update_telemetry()
-        send_command()
+        # Uses actual screen dimensions (captured once at startup) rather than
+        # a hardcoded 1920 for both axes - the old code mapped mouse_y over a
+        # 0-1920 range even though screen height is virtually never 1920,
+        # which silently compressed vertical (elbow) control into roughly the
+        # bottom half of its real range on a typical 1080-tall display.
+        s1 = map_value(mouse_x, 0, SCREEN_W, 10, 170)
+        s3 = map_value(mouse_y, 0, SCREEN_H, 10, 170)
+        apply_servo_update(s1=s1, s3=s3)
 
 
 def on_click(x, y, button, pressed):
@@ -255,8 +253,6 @@ def joystick_worker():
     joystick = None
 
     try:
-        list_hid_devices()
-
         print(f"Looking for joystick: VID={hex(JOYSTICK_VID)}, PID={hex(JOYSTICK_PID)}")
 
         device_info = find_joystick_device()
@@ -277,8 +273,6 @@ def joystick_worker():
             if not data:
                 continue
 
-            print(f"Raw Joystick Data: {data}")
-
             joystick_x = data[0]
             joystick_y = data[1]
 
@@ -288,13 +282,9 @@ def joystick_worker():
             if abs(new_servo1 - servo1_pos) < 2 and abs(new_servo3 - servo3_pos) < 2:
                 continue
 
-            servo1_pos = new_servo1
-            servo3_pos = new_servo3
-
             now = time.time()
             if now - last_joystick_send_time >= JOYSTICK_SEND_INTERVAL:
-                root.after(0, update_telemetry)
-                send_command()
+                apply_servo_update(s1=new_servo1, s3=new_servo3)
                 last_joystick_send_time = now
 
     except Exception as e:
@@ -349,9 +339,22 @@ def stop_joystick_tracking():
 
 # HAND TRACKING
 def start_hand_tracking():
-    global tracking_hand
+    global tracking_hand, hand_thread
+
+    if tracking_hand:
+        return
+
     tracking_hand = True
-    Hand_Tracker.start_hand_tracker()
+    # Runs on its own thread now instead of blocking the Tkinter mainloop -
+    # previously this called Hand_Tracker.start_hand_tracker() directly on
+    # the main thread, which froze the entire GUI (no button clicks, no
+    # redraws) for as long as hand tracking was active.
+    hand_thread = threading.Thread(
+        target=Hand_Tracker.start_hand_tracker,
+        args=(apply_servo_update, CLAW_CLOSED_POS, CLAW_OPEN_POS),
+        daemon=True,
+    )
+    hand_thread.start()
     activate_hand_button.config(state="disabled")
     deactivate_hand_button.config(state="normal")
 
@@ -366,8 +369,6 @@ def stop_hand_tracking():
 
     try:
         Hand_Tracker.stop_hand_tracker()
-    except NameError as e:
-        print(f"[Hand Tracking] stop ignored: {e}")
     except Exception as e:
         print(f"[Hand Tracking] stop error: {e}")
 
@@ -391,7 +392,7 @@ def voice_worker():
             print(status)
         q_audio.put(bytes(indata))
 
-    print("[Voice] model loaded – listening")
+    print("[Voice] model loaded - listening")
     try:
         with sd.RawInputStream(
             samplerate=VOICE_SAMPLE_RATE,
@@ -407,7 +408,7 @@ def voice_worker():
                     text = result.get("text", "").strip()
                     if text:
                         print(f">> {text}")
-                        handle_command(text.split())
+                        voice_movement.handle_command(text.split())
     except Exception as e:
         print("[Voice] error:", e)
 
@@ -440,6 +441,16 @@ root = tk.Tk()
 root.title("Robot Control")
 root.geometry("1280x720")
 root.configure(bg='black')
+
+# Captured once, on the main thread, rather than queried repeatedly from
+# whichever background thread happens to be driving the arm.
+SCREEN_W = root.winfo_screenwidth()
+SCREEN_H = root.winfo_screenheight()
+
+# Wire voice commands into the shared serial link/state now instead of
+# voice_movement keeping its own separate position tracking and its own
+# (incompatible) connection to the Arduino.
+voice_movement.set_controller(apply_servo_update, CLAW_CLOSED_POS, CLAW_OPEN_POS)
 
 text_color = "#00ff00"
 
