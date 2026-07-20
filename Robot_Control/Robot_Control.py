@@ -90,10 +90,6 @@ def map_value(x, in_min, in_max, out_min, out_max):
     return int((x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min)
 
 def send_command():
-    """The ONLY place that writes to the Arduino. Robot_Control.ino expects a
-    255 start byte followed by 3x little-endian uint16 (wrist, claw, elbow) -
-    7 bytes total. Hand_Tracker and voice_movement no longer pack their own
-    packets; everything funnels through apply_servo_update() -> here."""
     global ser, servo1_pos, servo2_pos, servo3_pos
 
     s1 = clamp(servo1_pos)
@@ -115,12 +111,6 @@ def send_command():
 
 
 def apply_servo_update(s1=None, s2=None, s3=None):
-    """Single shared entry point for every control source (mouse, joystick,
-    hand tracking, voice). This is what keeps servo1_pos/servo2_pos/servo3_pos,
-    the GUI telemetry, and the actual wire protocol from drifting out of sync
-    with each other - previously Hand_Tracker and voice_movement each kept
-    their own separate position state and their own (incompatible) serial
-    connection, invisible to this GUI and to each other."""
     global servo1_pos, servo2_pos, servo3_pos
     if s1 is not None:
         servo1_pos = clamp(s1)
@@ -179,11 +169,6 @@ def on_move(x, y):
 
     if tracking_mouse:
         mouse_x, mouse_y = x, y
-        # Uses actual screen dimensions (captured once at startup) rather than
-        # a hardcoded 1920 for both axes - the old code mapped mouse_y over a
-        # 0-1920 range even though screen height is virtually never 1920,
-        # which silently compressed vertical (elbow) control into roughly the
-        # bottom half of its real range on a typical 1080-tall display.
         s1 = map_value(mouse_x, 0, SCREEN_W, 10, 170)
         s3 = map_value(mouse_y, 0, SCREEN_H, 10, 170)
         apply_servo_update(s1=s1, s3=s3)
@@ -442,14 +427,9 @@ root.title("Robot Control")
 root.geometry("1280x720")
 root.configure(bg='black')
 
-# Captured once, on the main thread, rather than queried repeatedly from
-# whichever background thread happens to be driving the arm.
 SCREEN_W = root.winfo_screenwidth()
 SCREEN_H = root.winfo_screenheight()
 
-# Wire voice commands into the shared serial link/state now instead of
-# voice_movement keeping its own separate position tracking and its own
-# (incompatible) connection to the Arduino.
 voice_movement.set_controller(apply_servo_update, CLAW_CLOSED_POS, CLAW_OPEN_POS)
 
 text_color = "#00ff00"
