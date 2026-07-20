@@ -330,10 +330,6 @@ def start_hand_tracking():
         return
 
     tracking_hand = True
-    # Runs on its own thread now instead of blocking the Tkinter mainloop -
-    # previously this called Hand_Tracker.start_hand_tracker() directly on
-    # the main thread, which froze the entire GUI (no button clicks, no
-    # redraws) for as long as hand tracking was active.
     hand_thread = threading.Thread(
         target=Hand_Tracker.start_hand_tracker,
         args=(apply_servo_update, CLAW_CLOSED_POS, CLAW_OPEN_POS),
