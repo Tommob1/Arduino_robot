@@ -556,5 +556,7 @@ root.after(1000, lambda: load_text_character_by_character(title_label, ascii_art
 
 update_telemetry()
 send_command()
+root.update_idletasks()
+root.geometry(root.geometry())
 
 root.mainloop()
