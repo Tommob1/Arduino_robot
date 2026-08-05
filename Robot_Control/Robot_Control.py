@@ -10,6 +10,8 @@ import threading
 import queue
 import json
 import time
+import cv2
+from PIL import Image, ImageTk
 import sounddevice as sd
 from vosk import Model, KaldiRecognizer
 import voice_movement
@@ -50,6 +52,36 @@ JOYSTICK_SEND_INTERVAL = 0.03
 
 # HAND TRACKING
 hand_thread = None
+hand_preview_queue = queue.Queue(maxsize=1)
+
+def hand_frame_callback(bgr_image):
+    """Runs on Hand_Tracker's background thread. Only ever touches the queue -
+    never a Tk widget directly, since Tk widgets aren't thread-safe. The
+    PhotoImage creation and Label update happen in poll_hand_preview() on
+    the main thread instead. This replaces the old cv2.imshow() window,
+    which crashed with 'Unknown C++ exception from OpenCV code' when called
+    from a background thread on macOS."""
+    rgb = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
+    pil_img = Image.fromarray(rgb).resize((320, 240))
+    try:
+        hand_preview_queue.get_nowait()
+    except queue.Empty:
+        pass
+    try:
+        hand_preview_queue.put_nowait(pil_img)
+    except queue.Full:
+        pass
+
+def poll_hand_preview():
+    if tracking_hand:
+        try:
+            pil_img = hand_preview_queue.get_nowait()
+            imgtk = ImageTk.PhotoImage(image=pil_img)
+            hand_preview_label.imgtk = imgtk  # keep a reference so it isn't garbage collected
+            hand_preview_label.config(image=imgtk)
+        except queue.Empty:
+            pass
+    root.after(33, poll_hand_preview)
 
 # Voice
 voice_thread = None
@@ -333,6 +365,7 @@ def start_hand_tracking():
     hand_thread = threading.Thread(
         target=Hand_Tracker.start_hand_tracker,
         args=(apply_servo_update, CLAW_CLOSED_POS, CLAW_OPEN_POS),
+        kwargs={'frame_callback': hand_frame_callback},
         daemon=True,
     )
     hand_thread.start()
@@ -353,6 +386,8 @@ def stop_hand_tracking():
     except Exception as e:
         print(f"[Hand Tracking] stop error: {e}")
 
+    hand_preview_label.config(image='')
+    hand_preview_label.imgtk = None
     activate_hand_button.config(state="normal")
     deactivate_hand_button.config(state="disabled")
 
@@ -478,6 +513,11 @@ deactivate_hand_button = tk.Button(
 deactivate_hand_button.pack(pady=10, padx=10)
 deactivate_hand_button.config(state="disabled")
 
+# Hand-tracking preview renders here instead of in a separate OpenCV window,
+# since cv2.imshow() from a background thread isn't safe on macOS.
+hand_preview_label = tk.Label(root, bg='black', width=320, height=240)
+hand_preview_label.pack(pady=10)
+
 activate_joystick_button = tk.Button(
     root,
     text="Activate Joystick Control",
@@ -554,5 +594,6 @@ update_telemetry()
 send_command()
 root.update_idletasks()
 root.geometry(root.geometry())
+poll_hand_preview()
 
 root.mainloop()

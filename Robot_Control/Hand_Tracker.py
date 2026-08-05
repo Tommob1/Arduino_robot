@@ -66,17 +66,22 @@ def map_value(x, in_min, in_max, out_min, out_max):
     return int((x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min)
 
 
-def start_hand_tracker(apply_servo_update, claw_closed=60, claw_open=160):
+def start_hand_tracker(apply_servo_update, claw_closed=60, claw_open=160, frame_callback=None):
     """
     apply_servo_update(s1=None, s2=None, s3=None) is injected by Robot_Control.py.
     It owns the serial connection, the lock, and the wire format - this
     function only ever reports where it thinks the wrist/claw/elbow should go.
 
+    frame_callback(bgr_image), if given, is called once per processed frame
+    so the caller can display it however it wants.
+
     Runs a blocking capture loop, so the caller is expected to run this on a
-    background thread (Robot_Control.py does). Note: cv2.imshow/waitKey from
-    a non-main thread is fine on Linux with the GTK/Qt backends this project
-    uses, but isn't guaranteed on every platform (notably macOS) - if you
-    port this elsewhere and the preview window misbehaves, that's why.
+    background thread (Robot_Control.py does). cv2.imshow()/waitKey() are
+    intentionally NOT used here: HighGUI windows aren't thread-safe on macOS,
+    and calling them from a background thread throws
+    "cv2.error: Unknown C++ exception from OpenCV code". Handing frames back
+    through frame_callback lets the caller render them inside its own,
+    already-thread-safe UI (e.g. a Tkinter Label fed through a queue) instead.
     """
     global cap, _running
     cap = cv2.VideoCapture(0)
@@ -154,13 +159,11 @@ def start_hand_tracker(apply_servo_update, claw_closed=60, claw_open=160):
                 mp_drawing.DrawingSpec(color=(0, 0, 255), thickness=5, circle_radius=5),
                 mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=5))
 
-        cv2.imshow('Hand Tracker', image)
-        if cv2.waitKey(1) & 0xFF == 27:
-            break
+        if frame_callback is not None:
+            frame_callback(image)
 
     if cap:
         cap.release()
-    cv2.destroyAllWindows()
 
 
 def stop_hand_tracker():
@@ -169,4 +172,3 @@ def stop_hand_tracker():
     if cap:
         cap.release()
         cap = None
-    cv2.destroyAllWindows()
